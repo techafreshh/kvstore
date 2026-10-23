@@ -1,18 +1,25 @@
+# Factory worker: every factory stage (implement, runtime, holdout) runs
+# inside a container created from this file. The factory starts its
+# runtime/holdout scenario handlers inside the worker on the ports assigned
+# to this repo at onboard time (8112 + 8113) and reaches them from the host
+# through the published mappings below; the handlers probe the app on its
+# contract port (PORT=3000) inside the container. sleep infinity keeps the
+# container up even if the app dies, so the scenario channel stays alive.
 services:
   worker:
-    # Debian-based image, not -alpine: Alpine ships busybox sh only and the
-    # probe harness runs its stage scripts with bash inside this container.
     image: node:22
     working_dir: /app
-    command: node server.js
+    init: true
+    command: ["sh", "-c", "PORT=3000 node server.js & exec sleep infinity"]
     environment:
-      PORT: "3000"
       DATA_DIR: /data
     volumes:
-      - .:/app
-      - worker-data:/data
+      - ".:/app"
+      - "worker-data:/data"
     ports:
       - "127.0.0.1:3000:3000"
+      - "127.0.0.1:8112:8112"
+      - "127.0.0.1:8113:8113"
 
 volumes:
   worker-data:
