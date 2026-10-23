@@ -8,6 +8,18 @@ const path = require('node:path');
 // mirrors the PRD persistence layout issue #3's DATA_DIR/kv.json consumes.
 const store = new Map();
 
+// GET /<key> path constraint: exactly one raw, undecoded segment of 1-64
+// chars from [A-Za-z0-9_-]. Matching the raw pathname (never decodeURIComponent,
+// which throws URIError on malformed escapes) makes "we ird!" and "%zz"
+// segments fall to the global 404 instead of erroring.
+const KEY_PATTERN = /^\/([A-Za-z0-9_-]{1,64})$/;
+
+// Lazy expiry: decided at read time, so expired entries are indistinguishable
+// from absent ones while reads never mutate the store.
+function isExpired(entry, now = Date.now()) {
+  return entry.expiresAt !== null && Date.parse(entry.expiresAt) <= now;
+}
+
 // PORT from env, default 3000 for unset/empty/invalid values.
 function readPort(raw) {
   const port = Number(raw);
@@ -80,6 +92,28 @@ async function handleSet(req, res) {
   sendJson(res, 200, { key: body.key, expiresAt });
 }
 
+// GET /<key>: on hit answer { key, value } and report handled; on miss or
+// expired entry report not-handled so requestHandler reaches the single
+// global 404 (expired and absent respond identically).
+function handleGet(key, res) {
+  const entry = store.get(key);
+  if (entry === undefined || isExpired(entry)) return false;
+  sendJson(res, 200, { key, value: entry.value });
+  return true;
+}
+
+// GET /dump: bare key -> value map of every unexpired entry, values verbatim
+// (no expiresAt metadata). A single now snapshot keeps the pass consistent.
+function handleDump(res) {
+  const now = Date.now();
+  const entries = {};
+  for (const [key, entry] of store) {
+    if (isExpired(entry, now)) continue;
+    entries[key] = entry.value;
+  }
+  sendJson(res, 200, { entries });
+}
+
 function requestHandler(req, res) {
   // No-op error listeners: a probe client aborting mid-request must not
   // crash the process with an uncaught 'error' event.
@@ -98,6 +132,14 @@ function requestHandler(req, res) {
       sendJson(res, 400, { error: 'failed to read request body' });
     });
     return;
+  }
+  if (req.method === 'GET' && pathname === '/dump') {
+    handleDump(res);
+    return;
+  }
+  if (req.method === 'GET') {
+    const m = KEY_PATTERN.exec(pathname);
+    if (m !== null && handleGet(m[1], res)) return;
   }
   // Global 404 shape from the PRD: JSON error, never 5xx, never a hang.
   sendJson(res, 404, { error: 'not found' });
