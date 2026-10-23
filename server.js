@@ -33,6 +33,29 @@ function readDataDir() {
     : './data';
 }
 
+// Full-store atomic persistence: every successful set/delete rewrites the
+// entire store (lazily-expired entries included — until read or delete they
+// are still in the Map). Resolved per call so tests can set DATA_DIR after
+// require(), mirroring how readPort/readDataDir are used.
+function persistStore() {
+  const dir = path.resolve(readDataDir());
+  const entries = {};
+  for (const [key, entry] of store) {
+    entries[key] = { value: entry.value, expiresAt: entry.expiresAt };
+  }
+  // Contract file shape: entries fixed, nextCheckpoint reserved at 0. Values
+  // arrived via JSON.parse, so plain stringify round-trips them losslessly.
+  const payload = JSON.stringify({ entries, nextCheckpoint: 0 });
+  // Idempotent: DATA_DIR may not exist until the first mutation.
+  fs.mkdirSync(dir, { recursive: true });
+  // Hidden pid-suffixed temp inside DATA_DIR: same-directory rename below is
+  // atomic (rename(2) replaces the destination), so no reader of kv.json can
+  // ever observe a partially written file.
+  const tmp = path.join(dir, `.kv.json.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, payload);
+  fs.renameSync(tmp, path.join(dir, 'kv.json'));
+}
+
 function sendJson(res, status, payload) {
   const body = JSON.stringify(payload);
   res.writeHead(status, {
@@ -89,6 +112,15 @@ async function handleSet(req, res) {
     expiresAt = new Date(Math.max(-8.64e15, Math.min(8.64e15, targetMs))).toISOString();
   }
   store.set(body.key, { value: body.value, expiresAt });
+  // Persist before responding: the 200 implies the file already reflects
+  // this mutation. A persist failure keeps the in-memory mutation but
+  // surfaces as a single 500 (the next success rewrites the full file).
+  try {
+    persistStore();
+  } catch (err) {
+    sendJson(res, 500, { error: 'failed to persist store' });
+    return;
+  }
   sendJson(res, 200, { key: body.key, expiresAt });
 }
 
@@ -121,6 +153,16 @@ function handleDump(res) {
 // between 200 {"deleted":true} and 404 {"deleted":false}.
 function handleDelete(key, res) {
   const existed = store.delete(key);
+  // Only a successful delete persists: a 404 mutated nothing, so writing
+  // would be a no-op rewrite of unchanged state.
+  if (existed) {
+    try {
+      persistStore();
+    } catch (err) {
+      sendJson(res, 500, { error: 'failed to persist store' });
+      return;
+    }
+  }
   sendJson(res, existed ? 200 : 404, { deleted: existed });
 }
 
@@ -186,4 +228,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, requestHandler, readPort, readDataDir };
+module.exports = { createServer, requestHandler, readPort, readDataDir, persistStore };
