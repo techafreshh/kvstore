@@ -256,3 +256,103 @@ test('an unparseable kv.json is a fatal boot error, never a silent empty start',
   assert.ok(stderr.includes('kv.json'), `stderr must name the file: ${stderr}`);
   assert.ok(!stdout.includes('listening on port'), 'process must not start serving');
 });
+
+// The four tests below mirror issue #6's boot-contract acceptance scenarios
+// (seeded file served exactly, empty start + file creation, mutation
+// preservation) plus the PRD's pre-seeded-expired clause; the corrupt-file
+// scenario is the fatal-boot test directly above.
+
+test('a pre-seeded kv.json is served exactly on boot: GET /seed hits and boot leaves the file byte-identical', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-seed-'));
+  const seed = '{"entries":{"seed":{"value":"v","expiresAt":null}},"nextCheckpoint":0}';
+  fs.writeFileSync(path.join(dir, 'kv.json'), seed);
+
+  const port = await freePort();
+  const child = await startServer(dir, port);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/seed`);
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(await res.json(), { key: 'seed', value: 'v' });
+  } finally {
+    await stopServer(child);
+  }
+
+  // Loading must not rewrite or normalize: only a mutation persists, so the
+  // file stays byte-identical to what was seeded.
+  assert.strictEqual(fs.readFileSync(path.join(dir, 'kv.json'), 'utf8'), seed);
+});
+
+test('with no kv.json the server starts empty: GET misses, and only the first set creates the file', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-empty-'));
+
+  const port = await freePort();
+  const child = await startServer(dir, port);
+  try {
+    const miss = await fetch(`http://127.0.0.1:${port}/anything`);
+    assert.strictEqual(miss.status, 404);
+    assert.deepStrictEqual(await miss.json(), { error: 'not found' });
+    // A missed read mutates nothing, so the file must not exist yet.
+    assert.ok(!fs.existsSync(path.join(dir, 'kv.json')));
+
+    const set = await postSet(`http://127.0.0.1:${port}`, { key: 'first', value: 1 });
+    assert.strictEqual(set.status, 200);
+  } finally {
+    await stopServer(child);
+  }
+
+  const file = JSON.parse(fs.readFileSync(path.join(dir, 'kv.json'), 'utf8'));
+  assert.deepStrictEqual(file.entries.first, { value: 1, expiresAt: null });
+});
+
+test('a mutation on top of a seeded store rewrites the file with both the seeded and the new entry', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-merge-'));
+  fs.writeFileSync(path.join(dir, 'kv.json'),
+    '{"entries":{"seed":{"value":"v","expiresAt":null}},"nextCheckpoint":0}');
+
+  const port = await freePort();
+  const child = await startServer(dir, port);
+  try {
+    const res = await postSet(`http://127.0.0.1:${port}`, { key: 'added', value: 'w' });
+    assert.strictEqual(res.status, 200);
+  } finally {
+    await stopServer(child);
+  }
+
+  // The full-file rewrite must carry the hydrated entry and the new one.
+  const file = JSON.parse(fs.readFileSync(path.join(dir, 'kv.json'), 'utf8'));
+  assert.deepStrictEqual(file.entries.seed, { value: 'v', expiresAt: null });
+  assert.deepStrictEqual(file.entries.added, { value: 'w', expiresAt: null });
+});
+
+test('a pre-seeded expired entry is indistinguishable from absent: GET 404 and /dump omit it while live entries serve', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-expseed-'));
+  const expired = new Date(Date.now() - 1000).toISOString();
+  fs.writeFileSync(
+    path.join(dir, 'kv.json'),
+    JSON.stringify({
+      entries: {
+        seed: { value: 'v', expiresAt: null },
+        ghost: { value: 'x', expiresAt: expired },
+      },
+      nextCheckpoint: 0,
+    })
+  );
+
+  const port = await freePort();
+  const child = await startServer(dir, port);
+  try {
+    const ghost = await fetch(`http://127.0.0.1:${port}/ghost`);
+    assert.strictEqual(ghost.status, 404);
+    assert.deepStrictEqual(await ghost.json(), { error: 'not found' });
+
+    const dump = await fetch(`http://127.0.0.1:${port}/dump`);
+    assert.strictEqual(dump.status, 200);
+    assert.deepStrictEqual(await dump.json(), { entries: { seed: 'v' } });
+
+    const live = await fetch(`http://127.0.0.1:${port}/seed`);
+    assert.strictEqual(live.status, 200);
+    assert.deepStrictEqual(await live.json(), { key: 'seed', value: 'v' });
+  } finally {
+    await stopServer(child);
+  }
+});
