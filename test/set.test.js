@@ -53,6 +53,11 @@ test('POST /set with malformed JSON returns 400 and the server keeps serving', a
     const body = await res.json();
     assert.ok(Object.hasOwn(body, 'error'));
 
+    // An empty body is also unparseable, so it must hit the same guard.
+    const empty = await postSet(url, '');
+    assert.strictEqual(empty.status, 400);
+    assert.ok(Object.hasOwn(await empty.json(), 'error'));
+
     const health = await fetch(`${url}/health`);
     assert.strictEqual(health.status, 200);
     assert.deepStrictEqual(await health.json(), { ok: true });
@@ -75,6 +80,11 @@ test('POST /set rejects missing fields and non-integer ttlSec with 400', async (
       const parsed = await res.json();
       assert.ok(Object.hasOwn(parsed, 'error'), JSON.stringify(body));
     }
+
+    // Well-formed JSON that is not an object has no "key" at all.
+    const array = await postSet(url, '[1,2]');
+    assert.strictEqual(array.status, 400);
+    assert.ok(Object.hasOwn(await array.json(), 'error'));
   });
 });
 
