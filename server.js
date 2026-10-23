@@ -114,6 +114,16 @@ function handleDump(res) {
   sendJson(res, 200, { entries });
 }
 
+// DELETE /<key>: existence is decided by presence in the store, expired or
+// not — lazy expiry (#3) leaves expired entries in the Map, and the issue
+// counts them as existing until a read or delete removes them. So no
+// isExpired() call here: Map.prototype.delete's return value alone decides
+// between 200 {"deleted":true} and 404 {"deleted":false}.
+function handleDelete(key, res) {
+  const existed = store.delete(key);
+  sendJson(res, existed ? 200 : 404, { deleted: existed });
+}
+
 function requestHandler(req, res) {
   // No-op error listeners: a probe client aborting mid-request must not
   // crash the process with an uncaught 'error' event.
@@ -136,6 +146,16 @@ function requestHandler(req, res) {
   if (req.method === 'GET' && pathname === '/dump') {
     handleDump(res);
     return;
+  }
+  if (req.method === 'DELETE') {
+    // No reserved DELETE paths: /health, /set and /dump are GET/POST-only,
+    // so a stored key "dump" stays deletable via DELETE /dump. Non-matching
+    // DELETE paths fall through to the single global 404 below.
+    const m = KEY_PATTERN.exec(pathname);
+    if (m !== null) {
+      handleDelete(m[1], res);
+      return;
+    }
   }
   if (req.method === 'GET') {
     const m = KEY_PATTERN.exec(pathname);
