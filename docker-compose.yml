@@ -1,6 +1,8 @@
 services:
   worker:
-    image: node:22-alpine
+    # Debian-based image, not -alpine: Alpine ships busybox sh only and the
+    # probe harness runs its stage scripts with bash inside this container.
+    image: node:22
     working_dir: /app
     command: node server.js
     environment:
