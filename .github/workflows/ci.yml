@@ -17,3 +17,29 @@ jobs:
         run: node --test
       - name: Validate docker-compose file
         run: docker compose -f docker-compose.yml config -q
+
+  # Issue #9's fourth acceptance bullet as a repeatable check: the compose
+  # worker must boot, serve /health {"ok":true}, take a write, and land
+  # kv.json inside its container volume (DATA_DIR=/data).
+  compose-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Boot the compose worker
+        run: docker compose -f docker-compose.yml up -d worker
+      - name: Probe /health, write a key, verify kv.json inside the container
+        run: |
+          set -eu
+          curl -fsS --retry 30 --retry-connrefused --retry-delay 1 --retry-max-time 60 \
+            http://127.0.0.1:3000/health | grep -qx '{"ok":true}'
+          curl -fsS -X POST http://127.0.0.1:3000/set \
+            -H 'content-type: application/json' \
+            -d '{"key":"ci-smoke","value":1}' | grep -q '"expiresAt":null'
+          docker compose -f docker-compose.yml exec -T worker node -e '
+            const fs = require("node:fs");
+            const file = JSON.parse(fs.readFileSync("/data/kv.json", "utf8"));
+            if (!file.entries["ci-smoke"] || file.entries["ci-smoke"].value !== 1) process.exit(1);
+          '
+      - name: Tear down
+        if: always()
+        run: docker compose -f docker-compose.yml down -v
