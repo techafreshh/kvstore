@@ -27,6 +27,11 @@ function sendJson(res, status, payload) {
 }
 
 function requestHandler(req, res) {
+  // No-op error listeners: a probe client aborting mid-request must not
+  // crash the process with an uncaught 'error' event.
+  req.on('error', () => {});
+  res.on('error', () => {});
+
   const pathname = req.url.split('?')[0]; // never throws; query-insensitive
   if (req.method === 'GET' && pathname === '/health') {
     sendJson(res, 200, { ok: true });
@@ -52,7 +57,8 @@ if (require.main === module) {
   const server = createServer();
   // No host argument: bind all interfaces so compose port-forwarding works.
   server.listen(readPort(process.env.PORT), () => {
-    console.log(`kvstore listening on port ${server.address().port} (DATA_DIR=${dataDir})`);
+    // Readiness scanners match this line; keep it the only boot output.
+    console.log(`listening on port ${server.address().port}`);
   });
 }
 
