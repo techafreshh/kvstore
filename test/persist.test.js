@@ -5,6 +5,8 @@ const assert = require('node:assert');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const net = require('node:net');
+const { spawn } = require('node:child_process');
 const { createServer } = require('../server.js');
 
 // One shared temp DATA_DIR for this file's process; persistStore() resolves
@@ -51,10 +53,9 @@ test('every mutation persists the full store to DATA_DIR/kv.json in the contract
     assert.strictEqual(res.status, 200);
 
     const file = readStoreFile();
-    assert.ok(Object.hasOwn(file, 'nextCheckpoint'));
     assert.ok(Object.hasOwn(file, 'entries'));
-    assert.strictEqual(file.entries['persist-shape'].value, 42);
-    assert.strictEqual(file.entries['persist-shape'].expiresAt, null);
+    assert.strictEqual(file.nextCheckpoint, 0);
+    assert.deepStrictEqual(file.entries['persist-shape'], { value: 42, expiresAt: null });
   });
 });
 
@@ -73,10 +74,13 @@ test('a ttlSec set persists expiresAt as RFC3339 ending Z near now+ttl', async (
   await withServer(async (url) => {
     const res = await postSet(url, { key: 'persist-ttl', value: 1, ttlSec: 60 });
     assert.strictEqual(res.status, 200);
+    const { expiresAt: responseExpiresAt } = await res.json();
 
     const entry = readStoreFile().entries['persist-ttl'];
     assert.match(entry.expiresAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
     assert.ok(Math.abs(Date.parse(entry.expiresAt) - (Date.now() + 60000)) < 5000);
+    // File and response must describe the same instant.
+    assert.strictEqual(entry.expiresAt, responseExpiresAt);
   });
 });
 
@@ -144,4 +148,111 @@ test('50 alternating set/delete calls always leave kv.json complete JSON with no
     assert.ok(Object.hasOwn(finalFile, 'nextCheckpoint'));
     assert.deepStrictEqual(fs.readdirSync(DATA_DIR).sort(), ['kv.json']);
   });
+});
+
+// --- child-process scenarios: boot hydration and fatal corrupt state ------
+
+// Grab an unused loopback port; the probe is closed before the server binds.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = net.createServer();
+    probe.once('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+
+// Spawn a real `node server.js` process bounded to a private DATA_DIR and
+// resolve once it is accepting connections (readiness = its stdout line).
+function startServer(dir, port) {
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+    env: { ...process.env, DATA_DIR: dir, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const ready = new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error(`server not ready within 10s; stderr: ${stderr}`)),
+      10000
+    );
+    child.stdout.on('data', () => {
+      if (stdout.includes('listening on port')) {
+        clearTimeout(timer);
+        resolve();
+      }
+    });
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`server exited before readiness (code ${code}); stderr: ${stderr}`));
+    });
+  });
+  return ready.then(() => child);
+}
+
+function stopServer(child) {
+  child.kill('SIGTERM');
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('server did not exit within 5s')), 5000);
+    child.once('exit', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+test('state survives a full process restart: a fresh process hydrates from kv.json', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-restart-'));
+
+  let port = await freePort();
+  let child = await startServer(dir, port);
+  try {
+    const res = await postSet(`http://127.0.0.1:${port}`, { key: 'boot-k', value: 42 });
+    assert.strictEqual(res.status, 200);
+  } finally {
+    await stopServer(child);
+  }
+
+  // Same directory, brand-new process (and a new port): the old in-memory
+  // state is gone, so a 200 here can only come from the persisted file.
+  port = await freePort();
+  child = await startServer(dir, port);
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/boot-k`);
+    assert.strictEqual(res.status, 200);
+    assert.deepStrictEqual(await res.json(), { key: 'boot-k', value: 42 });
+  } finally {
+    await stopServer(child);
+  }
+});
+
+test('an unparseable kv.json is a fatal boot error, never a silent empty start', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'kvstore-corrupt-'));
+  fs.writeFileSync(path.join(dir, 'kv.json'), 'not json');
+
+  const port = await freePort();
+  const child = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+    env: { ...process.env, DATA_DIR: dir, PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const code = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('corrupt-state process never exited')), 10000);
+    child.once('exit', (exitCode) => {
+      clearTimeout(timer);
+      resolve(exitCode);
+    });
+  });
+
+  assert.notStrictEqual(code, 0);
+  assert.ok(stderr.includes('not valid JSON'), `stderr must name the failure: ${stderr}`);
+  assert.ok(stderr.includes('kv.json'), `stderr must name the file: ${stderr}`);
+  assert.ok(!stdout.includes('listening on port'), 'process must not start serving');
 });

@@ -33,27 +33,41 @@ function readDataDir() {
     : './data';
 }
 
+const KV_FILE = 'kv.json';
+
+// Snapshot of the whole Map in the contract's file shape. Expired entries
+// stay: expiry is a read-time concern (#3), so writing key A must not
+// silently drop key B's expired entry — the file mirrors the store verbatim.
+// Object.fromEntries (not a plain-object loop) so exotic keys such as
+// "__proto__" land as own JSON properties instead of hitting the prototype
+// setter and vanishing from the file.
+function storeSnapshot() {
+  return {
+    entries: Object.fromEntries(
+      [...store].map(([key, entry]) => [key, { value: entry.value, expiresAt: entry.expiresAt }])
+    ),
+    nextCheckpoint: 0,
+  };
+}
+
 // Full-store atomic persistence: every successful set/delete rewrites the
-// entire store (lazily-expired entries included — until read or delete they
-// are still in the Map). Resolved per call so tests can set DATA_DIR after
-// require(), mirroring how readPort/readDataDir are used.
+// entire store. Sync writes inside the handlers keep this simple and
+// correct: the event loop serializes requests, so on-disk state always
+// equals the last completed mutation and a 200 response implies the file
+// already reflects it. The temp file lives inside DATA_DIR (same directory
+// is required — rename(2) only atomically replaces within one filesystem)
+// and carries a pid suffix: under `node --test` several child processes
+// share the default ./data, and a fixed temp name would let one process
+// clobber the inode another process is still writing.
 function persistStore() {
   const dir = path.resolve(readDataDir());
-  const entries = {};
-  for (const [key, entry] of store) {
-    entries[key] = { value: entry.value, expiresAt: entry.expiresAt };
-  }
-  // Contract file shape: entries fixed, nextCheckpoint reserved at 0. Values
-  // arrived via JSON.parse, so plain stringify round-trips them losslessly.
-  const payload = JSON.stringify({ entries, nextCheckpoint: 0 });
   // Idempotent: DATA_DIR may not exist until the first mutation.
   fs.mkdirSync(dir, { recursive: true });
-  // Hidden pid-suffixed temp inside DATA_DIR: same-directory rename below is
-  // atomic (rename(2) replaces the destination), so no reader of kv.json can
-  // ever observe a partially written file.
-  const tmp = path.join(dir, `.kv.json.${process.pid}.tmp`);
-  fs.writeFileSync(tmp, payload);
-  fs.renameSync(tmp, path.join(dir, 'kv.json'));
+  const tmp = path.join(dir, `.${KV_FILE}.${process.pid}.tmp`);
+  fs.writeFileSync(tmp, JSON.stringify(storeSnapshot()));
+  // Atomic replace: a concurrent reader of kv.json sees either the whole
+  // previous file or the whole new one, never a partial write.
+  fs.renameSync(tmp, path.join(dir, KV_FILE));
 }
 
 function sendJson(res, status, payload) {
@@ -118,6 +132,7 @@ async function handleSet(req, res) {
   try {
     persistStore();
   } catch (err) {
+    console.error(`kvstore: failed to persist state: ${err.message}`);
     sendJson(res, 500, { error: 'failed to persist store' });
     return;
   }
@@ -159,6 +174,7 @@ function handleDelete(key, res) {
     try {
       persistStore();
     } catch (err) {
+      console.error(`kvstore: failed to persist state: ${err.message}`);
       sendJson(res, 500, { error: 'failed to persist store' });
       return;
     }
@@ -207,6 +223,41 @@ function requestHandler(req, res) {
   sendJson(res, 404, { error: 'not found' });
 }
 
+// Boot hydration: replay DATA_DIR/kv.json into the process-wide store.
+// A missing file is a fresh deployment (nothing to load); anything else —
+// unreadable file, unparseable JSON, wrong shape — is fatal: per the PRD the
+// process must never silently start empty over state it cannot understand.
+// Loaded entries are served as-is; the file is not rewritten until the
+// first mutation, so boot never normalizes what it reads.
+function loadStore(dir) {
+  const file = path.join(dir, KV_FILE);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err.code === 'ENOENT') return;
+    throw new Error(`cannot read ${file}: ${err.message}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`${file} is not valid JSON: ${err.message}`);
+  }
+  if (
+    parsed === null || typeof parsed !== 'object' || Array.isArray(parsed) ||
+    parsed.entries === null || typeof parsed.entries !== 'object' || Array.isArray(parsed.entries)
+  ) {
+    throw new Error(`${file} has no "entries" object`);
+  }
+  for (const [key, entry] of Object.entries(parsed.entries)) {
+    store.set(key, {
+      value: entry?.value ?? null,
+      expiresAt: typeof entry?.expiresAt === 'string' ? entry.expiresAt : null,
+    });
+  }
+}
+
 function createServer() {
   return http.createServer(requestHandler);
 }
@@ -220,6 +271,13 @@ if (require.main === module) {
     console.error(`kvstore: cannot create DATA_DIR ${dataDir}: ${err.message}`);
     process.exit(1);
   }
+  try {
+    // Hydrate before listen so the first request already sees old state.
+    loadStore(dataDir);
+  } catch (err) {
+    console.error(`kvstore: cannot load state: ${err.message}`);
+    process.exit(1);
+  }
   const server = createServer();
   // No host argument: bind all interfaces so compose port-forwarding works.
   server.listen(readPort(process.env.PORT), () => {
@@ -228,4 +286,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createServer, requestHandler, readPort, readDataDir, persistStore };
+module.exports = { createServer, requestHandler, readPort, readDataDir };
