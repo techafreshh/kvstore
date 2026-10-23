@@ -99,6 +99,37 @@ test('overwriting with no ttlSec clears expiresAt and updates the value in the f
   });
 });
 
+test('a "__proto__" key is an own property in the file, not eaten by the prototype setter', async () => {
+  await withServer(async (url) => {
+    const res = await postSet(url, { key: '__proto__', value: 7 });
+    assert.strictEqual(res.status, 200);
+
+    const { entries } = readStoreFile();
+    // Object.fromEntries must define an own data property: a plain-object
+    // assignment would hit the inherited __proto__ accessor and vanish.
+    assert.ok(Object.hasOwn(entries, '__proto__'));
+    assert.deepStrictEqual(entries['__proto__'], { value: 7, expiresAt: null });
+  });
+});
+
+test('a write mirrors the store verbatim: an unrelated mutation keeps expired entries', async () => {
+  await withServer(async (url) => {
+    const expired = await postSet(url, { key: 'persist-expired', value: 1, ttlSec: -10 });
+    assert.strictEqual(expired.status, 200);
+    const { expiresAt } = await expired.json();
+
+    // Lazy expiry (#3) leaves the expired entry in the store, and the full
+    // snapshot semantics mean writing another key must not drop it.
+    const live = await postSet(url, { key: 'persist-live', value: 2 });
+    assert.strictEqual(live.status, 200);
+
+    const { entries } = readStoreFile();
+    assert.deepStrictEqual(entries['persist-expired'], { value: 1, expiresAt });
+    assert.notStrictEqual(entries['persist-expired'].expiresAt, null);
+    assert.deepStrictEqual(entries['persist-live'], { value: 2, expiresAt: null });
+  });
+});
+
 test('a successful delete removes the key from the file; a 404 delete leaves it unchanged', async () => {
   await withServer(async (url) => {
     const set = await postSet(url, { key: 'persist-del', value: 7 });
