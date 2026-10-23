@@ -4,6 +4,10 @@ const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 
+// In-memory store keyed by key string; entry shape { value, expiresAt }
+// mirrors the PRD persistence layout issue #3's DATA_DIR/kv.json consumes.
+const store = new Map();
+
 // PORT from env, default 3000 for unset/empty/invalid values.
 function readPort(raw) {
   const port = Number(raw);
@@ -26,6 +30,56 @@ function sendJson(res, status, payload) {
   res.end(body);
 }
 
+// POST /set: strict validation, store, and expiresAt response semantics.
+// Async because the body is consumed via the async request iterator; every
+// failure path answers 400 and returns, so the promise itself never rejects.
+async function handleSet(req, res) {
+  let raw = null;
+  try {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    raw = Buffer.concat(chunks).toString('utf8');
+  } catch (err) {
+    sendJson(res, 400, { error: 'failed to read request body' });
+    return;
+  }
+  let body = null;
+  try {
+    body = JSON.parse(raw);
+  } catch (err) {
+    sendJson(res, 400, { error: 'invalid JSON body' });
+    return;
+  }
+  // Guard ladder: every rejection is an explicit, self-describing 400.
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    sendJson(res, 400, { error: 'body must be a JSON object' });
+    return;
+  }
+  if (typeof body.key !== 'string') {
+    sendJson(res, 400, { error: 'key is required and must be a string' });
+    return;
+  }
+  // Presence, not truthiness: a JSON null value is a storable value.
+  if (!Object.hasOwn(body, 'value')) {
+    sendJson(res, 400, { error: 'value is required' });
+    return;
+  }
+  if (body.ttlSec !== undefined && !Number.isInteger(body.ttlSec)) {
+    sendJson(res, 400, { error: 'ttlSec must be an integer' });
+    return;
+  }
+  let expiresAt = null;
+  if (body.ttlSec !== undefined) {
+    // Clamp the resulting time value (the valid Date range applies to it, not
+    // to the offset alone) so any integer ttlSec yields a valid UTC instant
+    // instead of an Invalid Date whose toISOString throws.
+    const targetMs = Date.now() + body.ttlSec * 1000;
+    expiresAt = new Date(Math.max(-8.64e15, Math.min(8.64e15, targetMs))).toISOString();
+  }
+  store.set(body.key, { value: body.value, expiresAt });
+  sendJson(res, 200, { key: body.key, expiresAt });
+}
+
 function requestHandler(req, res) {
   // No-op error listeners: a probe client aborting mid-request must not
   // crash the process with an uncaught 'error' event.
@@ -35,6 +89,14 @@ function requestHandler(req, res) {
   const pathname = req.url.split('?')[0]; // never throws; query-insensitive
   if (req.method === 'GET' && pathname === '/health') {
     sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (req.method === 'POST' && pathname === '/set') {
+    handleSet(req, res).catch(() => {
+      // Unreachable while handleSet catches its own failures; kept so a
+      // future edit can never surface as an unhandled rejection mid-probe.
+      sendJson(res, 400, { error: 'failed to read request body' });
+    });
     return;
   }
   // Global 404 shape from the PRD: JSON error, never 5xx, never a hang.
