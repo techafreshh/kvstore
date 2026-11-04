@@ -114,7 +114,7 @@ PRD.md                        product contract and non-goals
 - The whole store is in memory and every mutation synchronously rewrites all of `kv.json`, so write cost grows with store size and blocks the event loop.
 - Expired entries are never swept; they remain in memory and in the file until the key is overwritten or deleted.
 - Path-addressable keys are limited to `[A-Za-z0-9_-]{1,64}`. Keys outside that pattern, including the empty string, are reachable only through `/dump`.
-- `/health`, `/set` and `/dump` are reserved for `GET`/`POST`, so a stored key with one of those names cannot be read as `GET /<key>`. `DELETE /dump` deletes a stored key named `dump`.
+- `/health` and `/dump` are reserved for `GET`, so stored keys with those names are not readable through `GET /<key>`. `GET /set` still reads a stored key named `set`, and `DELETE /dump` deletes a stored key named `dump`.
 - `ttlSec` is integer seconds only; zero or negative values produce entries that are already expired.
 - No value-size or body-size limits, and no pagination on `/dump`.
 - No CORS headers.
