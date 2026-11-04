@@ -4,7 +4,7 @@
 
 > A tiny, durable key-value store you run as a single Node.js process.
 
-`kvstore` is an HTTP service exposing set, get, delete and dump over JSON. It is one plain `node:http` process with zero dependencies, and all of its state lives in a single JSON file on disk. TTLs are lazy: an entry expires the next time it is read.
+`kvstore` is an HTTP service exposing set, get, delete and dump over JSON. It is one plain `node:http` process with zero dependencies, and all of its state lives in a single JSON file on disk. TTLs are lazy: expiry is evaluated when an entry is read, with no background sweeper.
 
 ## Why this exists
 
@@ -39,7 +39,7 @@ curl -s http://localhost:3000/health
 | Endpoint | Request | Success response | Failure |
 | --- | --- | --- | --- |
 | `GET /health` | — | `200` `{"ok":true}` | — |
-| `POST /set` | JSON body `{"key":"<k>","value":<any JSON>,"ttlSec":<integer, optional>}` | `200` `{"key":"<k>","expiresAt":"<RFC 3339 UTC>"\|null}` | `400` `{"error":"…"}` for malformed JSON, a non-object body, a missing or non-string `key`, a missing `value`, or a non-integer `ttlSec`; `500` if persistence fails |
+| `POST /set` | JSON body `{"key":"<k>","value":<any JSON>,"ttlSec":<integer, optional>}` | `200` `{"key":"<k>","expiresAt":"<RFC 3339 UTC>"\|null}` | `400` `{"error":"…"}` for malformed JSON, a body that is not a JSON object (`null` and arrays included), a missing or non-string `key`, a missing `value`, or a non-integer `ttlSec`; `500` if persistence fails |
 | `GET /<key>` | — | `200` `{"key":"<k>","value":<v>}` | `404` `{"error":"not found"}` when the key is absent **or expired** |
 | `DELETE /<key>` | — | `200` `{"deleted":true}`; expired entries count as existing | `404` `{"deleted":false}`; `500` if persistence fails |
 | `GET /dump` | — | `200` `{"entries":{"<k>":<v>,…}}` for every unexpired entry, values verbatim | — |
