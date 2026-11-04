@@ -20,7 +20,7 @@ cd kvstore
 node server.js
 ```
 
-The process prints `listening on port 3000`. State is written to `./data/kv.json`, created on the first write.
+The process prints `listening on port 3000`. State is written to `./data/kv.json`: the directory is created at boot, the file on the first write.
 
 > [!NOTE]
 > There is no install step: the project has no dependencies and no `package.json`.
@@ -106,7 +106,7 @@ PRD.md                        product contract and non-goals
 
 ## Testing
 
-`node --test` runs every `test/*.test.js`: HTTP contracts, atomic persistence, restart round-trips, TTL semantics and concurrent writes. CI runs the same suite on Node.js 22, validates `docker-compose.yml`, and boots the `worker` service to check a live `/health`, a write, and `kv.json` inside the container.
+`node --test` runs every `test/*.test.js`: HTTP contracts, atomic persistence, restart round-trips, TTL semantics and concurrent writes. A single suite runs on its own, for example `node --test test/get.test.js`. CI runs the same suite on Node.js 22, validates `docker-compose.yml`, and boots the `worker` service to check a live `/health`, a write, and `kv.json` inside the container.
 
 ## Limitations
 
