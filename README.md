@@ -62,7 +62,7 @@ curl -s -X DELETE http://localhost:3000/greeting
 
 - `ttlSec` is an integer number of seconds. `expiresAt` is `null` when it is omitted, and overwriting a key without `ttlSec` clears whatever TTL it had.
 - `value` may be any JSON value, `null` included.
-- Keys addressed by path must match `[A-Za-z0-9_-]{1,64}`. `POST /set` accepts any string key and `GET /dump` returns it, but only keys matching that pattern are reachable through `GET /<key>` or `DELETE /<key>`.
+- Keys addressed by path must match `[A-Za-z0-9_-]{1,64}`. `POST /set` stores any string key and `GET /dump` returns it, but a key outside that pattern cannot be fetched or deleted by path.
 - Query strings are ignored: `GET /dump?x=1` is `GET /dump`.
 
 ## Persistence
@@ -114,7 +114,7 @@ PRD.md                        product contract and non-goals
 - The whole store is in memory and every mutation synchronously rewrites all of `kv.json`, so write cost grows with store size and blocks the event loop.
 - Expired entries are never swept; they remain in memory and in the file until the key is overwritten or deleted.
 - Path-addressable keys are limited to `[A-Za-z0-9_-]{1,64}`. Keys outside that pattern, including the empty string, are reachable only through `/dump`.
-- `/health` and `/dump` are reserved for `GET`, so stored keys with those names are not readable through `GET /<key>`. `GET /set` still reads a stored key named `set`, and `DELETE /dump` deletes a stored key named `dump`.
+- `GET` reserves `/health` and `/dump` before the key route, so stored keys named `health` or `dump` are not readable through `GET /<key>`; `GET /set` does read a key named `set`. `DELETE` has no reserved paths, so `DELETE /dump` deletes a stored key named `dump`.
 - `ttlSec` is integer seconds only; zero or negative values produce entries that are already expired.
 - No value-size or body-size limits, and no pagination on `/dump`.
 - No CORS headers.
