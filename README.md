@@ -42,7 +42,7 @@ curl -s http://localhost:3000/health
 | `POST /set` | JSON body `{"key":"<k>","value":<any JSON>,"ttlSec":<integer, optional>}` | `200` `{"key":"<k>","expiresAt":"<RFC 3339 UTC>"\|null}` | `400` `{"error":"…"}` for malformed JSON, a body that is not a JSON object (`null` and arrays included), a missing or non-string `key`, a missing `value`, or a non-integer `ttlSec`; `500` if persistence fails |
 | `GET /<key>` | — | `200` `{"key":"<k>","value":<v>}` | `404` `{"error":"not found"}` when the key is absent **or expired** |
 | `DELETE /<key>` | — | `200` `{"deleted":true}`; expired entries count as existing | `404` `{"deleted":false}`; `500` if persistence fails |
-| `GET /dump` | — | `200` `{"entries":{"<k>":<v>,…}}` for every unexpired entry, values verbatim | — |
+| `GET /dump` | — | `200` `{"entries":{"<k>":<v>,…}}` for unexpired entries, values verbatim | — |
 
 ```bash
 curl -s -X POST http://localhost:3000/set \
@@ -62,7 +62,8 @@ curl -s -X DELETE http://localhost:3000/greeting
 
 - `ttlSec` is an integer number of seconds. `expiresAt` is `null` when it is omitted, and overwriting a key without `ttlSec` clears whatever TTL it had.
 - `value` may be any JSON value, `null` included.
-- Keys addressed by path must match `[A-Za-z0-9_-]{1,64}`. `POST /set` stores any string key and `GET /dump` returns it, but a key outside that pattern cannot be fetched or deleted by path.
+- Keys addressed by path must match `[A-Za-z0-9_-]{1,64}`. `POST /set` accepts any string key, but a key outside that pattern (the empty string included) cannot be fetched or deleted by path — only seen in `/dump`.
+- `GET /dump` builds a plain JSON object, so an entry keyed `__proto__` is left out of its output. That entry is still stored, persisted, and readable at `GET /__proto__`.
 - Query strings are ignored: `GET /dump?x=1` is `GET /dump`.
 - Only `GET`, `POST` and `DELETE` are routed. Any other method, and any path that matches no route, answers `404` `{"error":"not found"}`.
 
@@ -79,7 +80,7 @@ Every successful `set` or `delete` rewrites the whole store to `DATA_DIR/kv.json
 
 `expiresAt` is `null` for an entry without a TTL. `nextCheckpoint` is a reserved, currently unused field. Expired entries stay in memory and in the file until the key is overwritten or deleted.
 
-On boot an existing `kv.json` is served exactly as found: pre-seeded entries are readable, already-expired ones are invisible, future-dated ones expire on schedule, and the file is not rewritten before the first mutation. A missing file means an empty store.
+On boot an existing `kv.json` is served as-is: pre-seeded entries are readable, already-expired ones are invisible, future-dated ones expire on schedule, and the file is not rewritten before the first mutation. A missing file means an empty store.
 
 > [!WARNING]
 > A `kv.json` that cannot be read, does not parse, or has no `entries` object is fatal: the process prints `kvstore: cannot load state:` on stderr and exits non-zero rather than starting empty.
@@ -114,7 +115,7 @@ PRD.md                        product contract and non-goals
 - One process, one instance: no replication, authentication, TLS, namespaces or watch/subscribe.
 - The whole store is in memory and every mutation synchronously rewrites all of `kv.json`, so write cost grows with store size and blocks the event loop.
 - Expired entries are never swept; they remain in memory and in the file until the key is overwritten or deleted.
-- Path-addressable keys are limited to `[A-Za-z0-9_-]{1,64}`. Keys outside that pattern, including the empty string, are reachable only through `/dump`.
+- Path-addressable keys are limited to `[A-Za-z0-9_-]{1,64}`. Keys outside that pattern, including the empty string, are reachable only through `/dump`; a key named `__proto__` is the inverse — readable by path, never listed by `/dump`.
 - Keys are matched against the raw request path, which is never percent-decoded: `/my%2Dkey` is a `404`, not a request for the key `my-key`.
 - `GET` reserves `/health` and `/dump` before the key route, so stored keys named `health` or `dump` are not readable through `GET /<key>`; `GET /set` does read a key named `set`. `DELETE` has no reserved paths, so `DELETE /dump` deletes a stored key named `dump`.
 - `ttlSec` is integer seconds only; zero or negative values produce entries that are already expired.
