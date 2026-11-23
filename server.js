@@ -251,10 +251,15 @@ function loadStore(dir) {
     throw new Error(`${file} has no "entries" object`);
   }
   for (const [key, entry] of Object.entries(parsed.entries)) {
-    store.set(key, {
-      value: entry?.value ?? null,
-      expiresAt: typeof entry?.expiresAt === 'string' ? entry.expiresAt : null,
-    });
+    if (
+      entry === null || typeof entry !== 'object' || Array.isArray(entry) ||
+      !Object.hasOwn(entry, 'value') ||
+      !Object.hasOwn(entry, 'expiresAt') ||
+      (entry.expiresAt !== null && typeof entry.expiresAt !== 'string')
+    ) {
+      throw new Error(`${file} has invalid entry for key "${key}"`);
+    }
+    store.set(key, { value: entry.value, expiresAt: entry.expiresAt });
   }
 }
 
